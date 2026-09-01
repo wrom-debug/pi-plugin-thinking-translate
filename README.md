@@ -59,7 +59,7 @@ cp config.example.json ~/.pi/agent/config/thinking-translate.json
 ```jsonc
 {
   "enabled": true,            // 总开关
-  "model": "ollama/RogerBen/HY-MT2-1.8B",  // 翻译模型 "provider/modelId"；null = 跟随当前对话模型models.json中需要配置
+  "model": "ollama/RogerBen/HY-MT2-1.8B",  // 翻译模型 "provider/modelId"；null = 跟随当前对话模型   models.json中需要配置
   "timeoutMs": 30000,         // 单次翻译调用超时（毫秒）
   "cjkThreshold": 0.2,        // 中文判定阈值：思考内容中文字符占比 ≥ 20% 视为中文，不翻译
   "maxThinkingChars": 4000,   // 翻译上限：超长思考只翻译开头部分（防止小模型劣质输出/超时）
