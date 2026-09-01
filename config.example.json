@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "model": "ollama/RogerBen/HY-MT2-1.8B",
+  "timeoutMs": 30000,
+  "cjkThreshold": 0.2,
+  "maxThinkingChars": 4000,
+  "chunkChars": 1200,
+  "translationFormat": "bold",
+  "label": "中文翻译",
+  "debug": false,
+  "translationColor": null
+}
