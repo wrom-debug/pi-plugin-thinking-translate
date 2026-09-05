@@ -8,5 +8,6 @@
   "translationFormat": "bold",
   "label": "中文翻译",
   "debug": false,
-  "translationColor": null
+  "translationColor": null,
+  "translateReply": false
 }
