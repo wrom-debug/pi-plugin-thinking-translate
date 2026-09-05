@@ -17,7 +17,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Model, ThinkingContent } from "@earendil-works/pi-ai";
+import type { Model, TextContent, ThinkingContent } from "@earendil-works/pi-ai";
 import { contentText } from "@earendil-works/pi-ai";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -46,6 +46,8 @@ interface Config {
 	translationColor: string | null;
 	/** 译文前显示的标签 */
 	label: string;
+	/** 是否翻译模型最终的输出答复（英文答复 → 中文译文插在答复后面） */
+	translateReply: boolean;
 	/** 调试日志 */
 	debug: boolean;
 }
@@ -60,6 +62,7 @@ const DEFAULT_CONFIG: Config = {
 	translationFormat: "bold",
 	translationColor: null,
 	label: "中文翻译",
+	translateReply: false,
 	debug: false,
 };
 
@@ -218,11 +221,12 @@ async function attemptTranslate(
 	cfg: Config,
 	attempt: number,
 ): Promise<string | undefined> {
-	// 固定输入格式：system 一句指令 + user "翻译：\n<内容>"；重试时换用强调版本
+	// 固定输入格式：system 指令 + user "翻译：\n<内容>"；
+	// 强调逐行对齐：每行对应翻译、保留空行与列表编号（防止模型合并行结构）
 	const systemPrompt =
 		attempt === 0
-			? "You are a translator. Translate the user's text into Simplified Chinese. Output ONLY the translation. Keep code, paths and identifiers unchanged."
-			: "You are a translator. Translate the user's text into Simplified Chinese (中文). You MUST output the Chinese translation only, in Chinese characters. Do NOT reply in English. Keep code, paths and identifiers unchanged.";
+			? "You are a translator. Translate the user's text into Simplified Chinese, line by line: every source line MUST become exactly one output line, keeping the same line breaks, blank lines and numbered list items (1., 2., 3.) each on its own line. Output ONLY the translation. Keep code, paths and identifiers unchanged."
+			: "You are a translator. Translate the user's text into Simplified Chinese (中文), line by line: every source line MUST become exactly one output line, keeping the same line breaks, blank lines and numbered list items. You MUST output the Chinese translation only, do NOT reply in English. Keep code, paths and identifiers unchanged.";
 	const userPrompt = `翻译：\n${text}`;
 	const maxTokens = Math.min(8000, Math.max(256, Math.ceil(text.length * 0.8)));
 
@@ -350,6 +354,34 @@ function resolveTranslationModel(ctx: ExtensionContext): Model<any> | undefined 
 	return ctx.model;
 }
 
+/**
+ * 判断一段文本是否值得翻译，是则翻译并返回格式化后的译文块。
+ * 规则：太短/中文为主/代码为主 → 不翻译；超长 → 截断翻译。
+ */
+async function translateIfEligible(
+	source: string,
+	model: Model<any>,
+	ctx: ExtensionContext,
+	cfg: Config,
+): Promise<{ formatted: string; truncated: boolean } | null> {
+	const trimmed = source.trim();
+	if (trimmed.length < 12) return null; // 太短不翻译
+	if (isChinese(trimmed, cfg.cjkThreshold)) return null; // 中文不翻译
+	if (isMostlyCode(trimmed)) return null; // 代码为主不翻译
+
+	// 截断超长内容（只翻译开头部分 + 截断提示）
+	const truncated = trimmed.length > cfg.maxThinkingChars;
+	const textForLLM = truncated
+		? trimmed.slice(0, cfg.maxThinkingChars) + "\n…(内容过长，以下略)…"
+		: trimmed;
+
+	const translated = await translateText(textForLLM, model, ctx, cfg);
+	if (!translated) return null;
+
+	const formatted = applyFormat(translated, cfg.translationFormat, cfg.translationColor);
+	return { formatted, truncated };
+}
+
 // ---------------------------------------------------------------------------
 // 扩展主体
 // ---------------------------------------------------------------------------
@@ -360,48 +392,56 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_end", async (event, ctx) => {
+		config = loadConfig(); // 每次消息结束后重新读配置：修改配置文件立即生效（无需 /reload）
 		if (!config.enabled) return;
 		const message = event.message;
 		if (message.role !== "assistant") return;
 		if (!Array.isArray(message.content)) return;
 
-		// 取出思考块
-		const thinkingBlocks = message.content.filter(
-			(c): c is ThinkingContent =>
-				c.type === "thinking" && typeof (c as ThinkingContent).thinking === "string",
-		);
-		if (thinkingBlocks.length === 0) return;
-
 		const model = resolveTranslationModel(ctx);
 		if (!model) return;
 
 		let changed = false;
-		for (const block of thinkingBlocks) {
-			const thinking = block.thinking.trim();
-			if (thinking.length < 12) continue; // 太短不翻译
-			if (isChinese(thinking, config.cjkThreshold)) continue; // 中文不翻译
-			if (isMostlyCode(thinking)) continue; // 代码为主不翻译
 
-			// 截断超长思考（只翻译开头部分 + 截断提示）
-			const truncated = thinking.length > config.maxThinkingChars;
-			const textForLLM = truncated
-				? thinking.slice(0, config.maxThinkingChars) + "\n…(内容过长，以下略)…"
-				: thinking;
-
-			const translated = await translateText(textForLLM, model, ctx, config);
-			if (!translated) continue;
-
-			// 译文按配置格式+颜色显示（默认粗体），标签保持粗体
-			const formattedTranslation = applyFormat(translated, config.translationFormat, config.translationColor);
-			block.thinking = `${thinking}\n\n---\n\n**${config.label}**\n\n${formattedTranslation}${truncated ? "\n\n*（思考过长，译文为开头部分）*" : ""}`;
+		// 1) 翻译思考块（始终执行）
+		for (const block of message.content) {
+			if (block.type !== "thinking") continue;
+			const thinking = (block as ThinkingContent).thinking;
+			const outcome = await translateIfEligible(thinking, model, ctx, config);
+			if (!outcome) continue;
+			const suffix = outcome.truncated ? "\n\n*（思考过长，译文为开头部分）*" : "";
+			// 译文块：开头的 --- 分隔思考与译文，结尾的 --- 分隔译文与后续内容
+			(block as ThinkingContent).thinking =
+				thinking.trimEnd() + `\n\n---\n\n**${config.label}**\n\n${outcome.formatted}${suffix}\n\n---`;
 			changed = true;
+		}
+
+		// 2) 翻译最终答复（可配置：translateReply = true 时开启）
+		if (config.translateReply) {
+			// 取最后一个 text 块作为最终答复
+			let lastTextIdx = -1;
+			for (let i = 0; i < message.content.length; i++) {
+				if (message.content[i].type === "text") lastTextIdx = i;
+			}
+			if (lastTextIdx >= 0) {
+				const block = message.content[lastTextIdx] as TextContent;
+				const reply = block.text;
+				const outcome = await translateIfEligible(reply, model, ctx, config);
+				if (outcome) {
+					const suffix = outcome.truncated ? "\n\n*（内容过长，译文为开头部分）*" : "";
+					block.text =
+						reply.trimEnd() + `\n\n---\n\n**${config.label}**\n\n${outcome.formatted}${suffix}\n\n---`;
+					changed = true;
+				}
+			}
 		}
 
 		if (changed) return { message };
 	});
 
 	pi.registerCommand("thinking-translate", {
-		description: "思考翻译插件：/thinking-translate [on|off|status|model <provider/modelId>|reset]",
+		description:
+			"思考翻译插件：/thinking-translate [on|off|reply on|off|status|model <provider/modelId>|reset]",
 		handler: async (args, ctx) => {
 			const [cmd, ...rest] = args.trim().split(/\s+/);
 			const notify = (msg: string) => {
@@ -418,6 +458,19 @@ export default function (pi: ExtensionAPI) {
 					config.enabled = false;
 					saveConfig(config);
 					notify("思考翻译已关闭");
+					break;
+				case "reply":
+					if (rest[0] === "on") {
+						config.translateReply = true;
+						saveConfig(config);
+						notify("最终答复翻译已开启（英文答复会追加中文译文）");
+					} else if (rest[0] === "off") {
+						config.translateReply = false;
+						saveConfig(config);
+						notify("最终答复翻译已关闭");
+					} else {
+						notify("用法：/thinking-translate reply on|off");
+					}
 					break;
 				case "model":
 					if (!rest[0]) {
@@ -440,7 +493,8 @@ export default function (pi: ExtensionAPI) {
 						`思考翻译：${config.enabled ? "✅ 开启" : "⛔ 关闭"}\n` +
 							`翻译模型：${config.model ?? (model ? `${model.provider}/${model.id}` : "（无可用模型）")}\n` +
 							`中文判定阈值：≥${Math.round(config.cjkThreshold * 100)}%\n` +
-							`翻译上限：${config.maxThinkingChars} 字符（分段 ${config.chunkChars}）`,
+							`翻译上限：${config.maxThinkingChars} 字符（分段 ${config.chunkChars}）\n` +
+							`翻译最终答复：${config.translateReply ? "✅ 开启" : "⛔ 关闭"}`,
 					);
 					break;
 				}

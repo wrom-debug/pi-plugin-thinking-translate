@@ -43,6 +43,7 @@ cp config.example.json ~/.pi/agent/config/thinking-translate.json
 | `/thinking-translate on` / `off` | 开启 / 关闭 |
 | `/thinking-translate model <provider>/<modelId>` | 指定翻译模型（如 `ollama/RogerBen/HY-MT2-1.8B`） |
 | `/thinking-translate reset` | 恢复使用当前对话模型翻译 |
+| `/thinking-translate reply on` / `off` | 开启 / 关闭最终答复翻译 |
 
 **效果示意**（展开思考块后可见）：
 
@@ -51,6 +52,7 @@ cp config.example.json ~/.pi/agent/config/thinking-translate.json
 ─────────────
 **中文翻译**            ← 粗体标签
 **译文（粗体，颜色可配）**   ← 中文译文（默认粗体；颜色/格式可在配置中调整）
+─────────────           ← 结尾分隔线（译文块被两条分隔线夹住，便于与后续内容区分）
 （这里才是正式答复）
 ```
 
@@ -59,17 +61,21 @@ cp config.example.json ~/.pi/agent/config/thinking-translate.json
 ```jsonc
 {
   "enabled": true,            // 总开关
-  "model": "ollama/RogerBen/HY-MT2-1.8B",  // 翻译模型 "provider/modelId"；null = 跟随当前对话模型   models.json中需要配置
+  "model": "ollama/RogerBen/HY-MT2-1.8B",  // 翻译模型 "provider/modelId"；null = 跟随当前对话模型
   "timeoutMs": 30000,         // 单次翻译调用超时（毫秒）
   "cjkThreshold": 0.2,        // 中文判定阈值：思考内容中文字符占比 ≥ 20% 视为中文，不翻译
   "maxThinkingChars": 4000,   // 翻译上限：超长思考只翻译开头部分（防止小模型劣质输出/超时）
   "chunkChars": 1200,         // 分段大小：长文本分段翻译（本地小模型如 HY-MT2 超 ~1500 字符会超时）
   "translationFormat": "bold",      // 译文显示格式：italic=斜体，bold=粗体，code=等宽，strikethrough=删除线，plain=普通
   "translationColor": null,     // 译文颜色 "#RRGGBB"（如 "#FF8800"）；null = 不指定（用思考块默认色）
-  "label": "中文翻译",        // 译文前显示的标签文字
+  "label": "中文翻译",
+  "translateReply": false,    // also translate the final reply (English reply → Chinese appended after it)        // 译文前显示的标签文字
+  "translateReply": false,     // 是否翻译最终答复（英文答复 → 中文译文追加在答复后面）
   "debug": false              // true 时打印翻译失败日志
 }
 ```
+
+> 修改配置文件后**立即生效**（每次消息后自动重新读取，无需重启/`/reload`）；也可用命令即时切换。
 
 ## 行为规则
 
@@ -78,6 +84,8 @@ cp config.example.json ~/.pi/agent/config/thinking-translate.json
 3. **代码/路径为主的思考** → 不翻译
 4. **超长思考**（> maxThinkingChars）→ 只翻译开头部分并标注"（思考过长，译文为开头部分）"
 5. 翻译引擎用当前 LLM 模型，可通过配置指定其它模型（如本地 Ollama 翻译模型，零费用）
+6. **逐行对齐**：译文按原文行逐行翻译，保留换行、空行与列表编号结构
+7. **翻译最终答复**（`translateReply: true` 时）：英文答复也会翻译成中文，译文追加在答复后面
 
 ## 故障排查
 
@@ -96,6 +104,10 @@ cp config.example.json ~/.pi/agent/config/thinking-translate.json
 
 ## 版本记录
 
+- v1.7：配置文件修改即时生效（消息后自动重读）；新增 `reply on|off` 命令即时切换最终答复翻译
+- v1.6：译文块末尾增加分隔线（译文被两条 `---` 夹住，便于与后续内容区分）
+- v1.5：新增 `translateReply` 配置，可翻译最终答复（译文追加在答复后）
+- v1.4：逐行对齐翻译指令（修复译文行结构被合并，列表/空行完整保留）
 - v1.3：译文颜色可配置（`translationColor`，"#RRGGBB"）、默认格式改为粗体（中文终端渲染可靠）
 - v1.2：译文中文校验 + 自动重试（修复小模型偶发输出英文）
 - v1.1：译文格式可配置（italic/bold/code/strikethrough/plain）、README 中英文双语
@@ -137,6 +149,7 @@ cp config.example.json ~/.pi/agent/config/thinking-translate.json
 | `/thinking-translate on` / `off` | Enable / disable |
 | `/thinking-translate model <provider>/<modelId>` | Set the translation model (e.g. `ollama/RogerBen/HY-MT2-1.8B`) |
 | `/thinking-translate reset` | Use the current conversation model for translation |
+| `/thinking-translate reply on` / `off` | Enable / disable translating the final reply |
 
 ### Behavior
 
@@ -145,6 +158,8 @@ cp config.example.json ~/.pi/agent/config/thinking-translate.json
 3. **Code/path-heavy thinking** → not translated
 4. **Very long thinking** (> `maxThinkingChars`) → only the beginning is translated, marked as truncated
 5. The translation engine defaults to the current model; you can pin a different model (e.g. a local Ollama model, zero cost)
+6. **Line-by-line alignment**: translations keep the original line breaks, blank lines and list numbering
+7. **Translate the final reply** (when `translateReply: true`): an English reply is also translated into Chinese, appended after the reply
 
 ### Config
 
@@ -159,12 +174,26 @@ cp config.example.json ~/.pi/agent/config/thinking-translate.json
   "translationFormat": "bold",      // display format: italic | bold | code | strikethrough | plain
   "translationColor": null,     // translation color "#RRGGBB" (e.g. "#FF8800"); null = default (thinking block color)
   "label": "中文翻译",
+  "translateReply": false,    // also translate the final reply (English reply → Chinese appended after it)
   "debug": false
 }
 ```
+
+> Config changes take effect **immediately** (re-read after every message; no restart/`/reload` needed). Commands can also toggle settings on the fly.
 
 ### Notes
 
 - Single-file TypeScript, loaded directly by pi's built-in jiti runtime — **no build step, no npm dependencies**
 - Only uses pi's bundled `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai`
 - The translation model must be configured on the target machine (in `models.json` or a logged-in provider); local Ollama works out of the box
+
+### Version History
+
+- v1.7: config changes take effect immediately (auto re-read after each message); new `reply on|off` command
+- v1.6: closing `---` separator after the translation block
+- v1.5: new `translateReply` option to translate the final reply (appended after the reply)
+- v1.4: line-by-line alignment (fixes merged line structure)
+- v1.3: configurable translation color (`translationColor`) and default format changed to bold
+- v1.2: Chinese output validation + auto retry
+- v1.1: configurable translation format; bilingual README
+- v1.0: initial release
